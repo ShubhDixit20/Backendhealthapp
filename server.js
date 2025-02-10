@@ -129,7 +129,7 @@ app.get("/api/video/:exercise_name", async (req, res) => {
     }
 
     try {
-        const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "fs" });
+        const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "videos" });
         
         // Check if the file exists in GridFS
         const files = await bucket.find({ filename: exercise_name }).toArray();
