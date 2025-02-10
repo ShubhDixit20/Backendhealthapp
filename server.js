@@ -120,25 +120,30 @@ app.post("/upload-video", upload.single("videoFile"), (req, res) => {
     }
 });
 
-// 4. Fetch and stream video by exercise name
+// Route to fetch video by exercise name
 app.get("/api/video/:exercise_name", async (req, res) => {
     const { exercise_name } = req.params;
 
+    if (!exercise_name) {
+        return res.status(400).json({ error: "Exercise name is required" });
+    }
+
     try {
-        // Find the file in GridFS
-        const file = await conn.db.collection("videos.files").findOne({ filename: exercise_name });
-        if (!file) {
+        const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "fs" });
+        
+        // Check if the file exists in GridFS
+        const files = await bucket.find({ filename: exercise_name }).toArray();
+        if (!files || files.length === 0) {
             return res.status(404).json({ error: "Video not found" });
         }
 
         // Stream the video
-        const readStream = gfs.openDownloadStreamByName(exercise_name);
-        res.set("Content-Type", file.contentType);
-        res.set("Content-Disposition", `inline; filename="${file.filename}"`);
-        readStream.pipe(res);
+        res.set("Content-Type", files[0].contentType || "video/mp4");
+        const downloadStream = bucket.openDownloadStreamByName(exercise_name);
+        downloadStream.pipe(res);
     } catch (error) {
         console.error("Error fetching video:", error);
-        res.status(500).json({ error: "Server error" });
+        res.status(500).json({ error: "Server error while fetching video" });
     }
 });
 
