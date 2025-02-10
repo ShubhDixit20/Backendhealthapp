@@ -4,6 +4,7 @@ const bodyParser = require("body-parser");
 const multer = require("multer");
 const cors = require("cors");
 const fs = require("fs");
+const router = express.Router();
 const { GridFSBucket } = require("mongodb");
 
 // Initialize app and middleware
@@ -17,12 +18,15 @@ mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
     .then(() => console.log("Connected to MongoDB"))
     .catch(err => console.error("Failed to connect to MongoDB:", err));
 
-// GridFS bucket and connection
+const conn = mongoose.createConnection(MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+});
+
 let gfs;
-const conn = mongoose.connection;
 conn.once("open", () => {
-    gfs = new GridFSBucket(conn.db, { bucketName: "videos" });
-    console.log("GridFS Bucket initialized");
+    gfs = new GridFSBucket(conn.db, { bucketName: "videos" }); // Bucket for storing video files
+    console.log("GridFS connected");
 });
 
 // Instruction schema and model
@@ -38,6 +42,7 @@ const Instruction = mongoose.model("Instruction", instructionSchema);
 const upload = multer({ dest: "uploads/" });
 
 // **Routes**
+
 // 1. Upload JSON data and store in MongoDB
 app.post("/upload-instructions", upload.single("jsonFile"), (req, res) => {
     const filePath = req.file.path;
@@ -92,34 +97,47 @@ app.get("/api/exercise", async (req, res) => {
     }
 });
 
-// 3. Stream video by exercise name
-app.get("/api/video/:exerciseName", async (req, res) => {
-    const { exerciseName } = req.params;
+// 3. Upload videos to GridFS
+app.post("/upload-video", upload.single("videoFile"), (req, res) => {
+    const { originalname, path } = req.file;
 
     try {
-        const files = await conn.db.collection("videos.files").find({ filename: exerciseName }).toArray();
+        // Open a stream to GridFS
+        const uploadStream = gfs.openUploadStream(originalname);
+        fs.createReadStream(path)
+            .pipe(uploadStream)
+            .on("error", (err) => {
+                console.error("Error uploading video to GridFS:", err);
+                res.status(500).json({ error: "Error uploading video" });
+            })
+            .on("finish", () => {
+                fs.unlinkSync(path); // Delete temp file after upload
+                res.status(200).json({ message: "Video uploaded successfully", fileId: uploadStream.id });
+            });
+    } catch (error) {
+        console.error("Error handling video upload:", error);
+        res.status(500).json({ error: "Server error" });
+    }
+});
 
-        if (!files || files.length === 0) {
+// 4. Fetch and stream video by exercise name
+app.get("/api/video/:exercise_name", async (req, res) => {
+    const { exercise_name } = req.params;
+
+    try {
+        // Find the file in GridFS
+        const file = await conn.db.collection("videos.files").findOne({ filename: exercise_name });
+        if (!file) {
             return res.status(404).json({ error: "Video not found" });
         }
 
-        const file = files[0];
-
-        // Set headers for video streaming
-        res.set({
-            "Content-Type": file.contentType,
-            "Content-Length": file.length,
-        });
-
-        const downloadStream = gfs.openDownloadStreamByName(exerciseName);
-        downloadStream.pipe(res);
-
-        downloadStream.on("error", (err) => {
-            console.error("Stream error:", err);
-            res.status(500).json({ error: "Failed to stream video" });
-        });
-    } catch (err) {
-        console.error("Error streaming video:", err);
+        // Stream the video
+        const readStream = gfs.openDownloadStreamByName(exercise_name);
+        res.set("Content-Type", file.contentType);
+        res.set("Content-Disposition", `inline; filename="${file.filename}"`);
+        readStream.pipe(res);
+    } catch (error) {
+        console.error("Error fetching video:", error);
         res.status(500).json({ error: "Server error" });
     }
 });
