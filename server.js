@@ -6,6 +6,7 @@ const cors = require("cors");
 const fs = require("fs");
 const router = express.Router();
 const { GridFSBucket } = require("mongodb");
+const { Server } = require("http");
 
 // Initialize app and middleware
 const app = express();
@@ -25,9 +26,13 @@ const conn = mongoose.createConnection(MONGO_URI, {
 
 let gfs;
 conn.once("open", () => {
-    gfs = new GridFSBucket(conn.db, { bucketName: "videos" }); // Bucket for storing video files
-    console.log("GridFS connected");
+    gfs = new mongoose.mongo.GridFSBucket(conn.db, {
+        bucketName: "videos", // Ensure this matches your MongoDB bucket name
+    });
+    console.log("GridFSBucket initialized!");
 });
+conn.set("bufferCommands", false);
+conn.set("maxTimeMS", 600000); // 10 minutes timeout
 
 // Instruction schema and model
 const instructionSchema = new mongoose.Schema({
@@ -78,7 +83,6 @@ app.post("/upload-instructions", upload.single("jsonFile"), (req, res) => {
     });
 });
 
-// 2. Fetch exercise details
 app.get("/api/exercise", async (req, res) => {
     const { exercise_name } = req.query;
 
@@ -90,7 +94,7 @@ app.get("/api/exercise", async (req, res) => {
         const exercise = await Instruction.findOne({ exercise_name });
         if (!exercise) return res.status(404).json({ error: "Exercise not found" });
 
-        res.json(exercise);
+        res.json(exercise); // Includes video_url, english_instructions, and hindi_instructions
     } catch (error) {
         console.error("Error fetching exercise details:", error);
         res.status(500).json({ error: "Server error" });
@@ -120,35 +124,44 @@ app.post("/upload-video", upload.single("videoFile"), (req, res) => {
     }
 });
 
-// Route to fetch video by exercise name
-app.get("/api/video/:exercise_name", async (req, res) => {
-    const { exercise_name } = req.params;
+app.get("/api/video/:name", async (req, res) => {
+    const { name } = req.params;
 
-    if (!exercise_name) {
-        return res.status(400).json({ error: "Exercise name is required" });
-    }
+    if (!name) return res.status(400).json({ error: "Exercise name is required" });
 
     try {
-        const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "videos" });
-        
-        // Check if the file exists in GridFS
-        const files = await bucket.find({ filename: exercise_name }).toArray();
-        if (!files || files.length === 0) {
-            return res.status(404).json({ error: "Video not found" });
-        }
+        if (!gfs) return res.status(500).json({ error: "GridFS not initialized yet" });
 
-        // Stream the video
-        res.set("Content-Type", files[0].contentType || "video/mp4");
-        const downloadStream = bucket.openDownloadStreamByName(exercise_name);
-        downloadStream.pipe(res);
+        const files = await conn.db.collection("videos.files").findOne({ filename: name });
+
+        if (!files) return res.status(404).json({ error: "Video not found" });
+
+        // Set headers for streaming
+        res.set({
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+            "Content-Length": files.length,
+            "Connection": "keep-alive",
+        });
+
+        // Stream video in chunks
+        const readStream = gfs.openDownloadStreamByName(name);
+        readStream.pipe(res);
+        readStream.on("error", (err) => {
+            console.error("Streaming error:", err);
+            res.status(500).send("Error streaming video");
+        });
     } catch (error) {
         console.error("Error fetching video:", error);
-        res.status(500).json({ error: "Server error while fetching video" });
+        res.status(500).json({ error: "Server error" });
     }
 });
+
+
 
 // Start server
 const PORT = 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
